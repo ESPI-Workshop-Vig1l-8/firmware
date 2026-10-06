@@ -1,94 +1,216 @@
 /**
- * DIAGNOSTIC MATÉRIEL - VIG1L-8 (ESP32)
+ * ============================================================================
+ *  AETHERCORP // SENTINEL-X — Firmware du nœud VIG1L-8 (ESP32)
+ * ============================================================================
+ *  Capteurs -> JSON -> MQTTS (TLS) vers le broker du PC Serveur Local.
  *
- * Au démarrage : vérifie le câblage et l'alimentation de chaque composant,
- * puis affiche les mesures en continu sur le moniteur série (115200 bauds).
+ *  Topics (DEVICE_ID = nom d'utilisateur MQTT, voir l'ACL de l'infra) :
+ *    vigil8/<id>/telemetry  publié toutes les 2 s
+ *    vigil8/<id>/event      publié à chaque changement d'état du PIR
+ *    vigil8/<id>/status     {"online":true} à la connexion, {"online":false} en LWT (retenu)
+ *    vigil8/<id>/cmd        reçu : {"strobe":bool,"duration_s":int} -> LED environnement clignotante
  *
- * Câblage :
- *   PIR HC-SR501 : VCC -> VIN (5V), GND -> GND, OUT -> GPIO 14
- *   MQ-2         : VCC -> VIN (5V), GND -> GND, AO -> pont 10k/20k -> GPIO 34
- *   DHT22        : VCC -> 3V3, GND -> GND, DATA -> GPIO 4 (+ pull-up 10k vers 3V3 si capteur nu)
- *   LED alerte   : GPIO 19 -> 220 Ω -> LED -> GND
+ *  LED : mouvement (PIR) ; environnement fixe = plafond local gaz/température
+ *  dépassé (premier avertissement), clignotante = alerte décidée par le serveur.
+ *
+ *  Format détaillé : README.md de ce dépôt et de infra.
  */
 
 #include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
 #include <DHT.h>
 
-#define PIN_PIR        14  // Sortie OUT du HC-SR501
-#define PIN_MQ2_AO     34  // Sortie analogique du MQ-2 (ADC1, compatible Wi-Fi)
-#define PIN_DHT         4  // Données du DHT22
-#define PIN_LED_ESP     2  // LED intégrée
-#define PIN_LED_ALERTE 19  // LED externe
+#include "config.h"
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#error "include/secrets.h manquant : copier include/secrets.example.h vers include/secrets.h et le remplir"
+#endif
 
-const unsigned long PIR_WARMUP_MS      = 30000;  // calibration du HC-SR501 après mise sous tension
-const unsigned long REPORT_INTERVAL_MS = 2000;   // le DHT22 ne supporte qu'une lecture toutes les 2 s
-const float         MQ2_DIVIDER        = 1.5f;   // pont 10k/20k : tension AO = tension broche × 1.5
+const unsigned long WIFI_RETRY_MS = 10000;
+const unsigned long MQTT_RETRY_MS = 5000;
+const unsigned long STROBE_HALF_PERIOD_MS = 100;
 
+WiFiClientSecure net;
+PubSubClient mqtt(net);
 DHT dht(PIN_DHT, DHT22);
 
-int lastPir = -1;
-unsigned long lastPirChange = 0;
-unsigned long lastReport = 0;
+String topicTelemetry, topicEvent, topicStatus, topicCmd;
 
-// ============================================================================
-// VÉRIFICATIONS AU DÉMARRAGE
-// ============================================================================
+// Un compteur par topic : un trou dans "seq" = message perdu
+uint32_t seqTelemetry = 0;
+uint32_t seqEvent = 0;
 
-void checkLeds() {
-  Serial.println("[LED]   Clignotement x3 : la LED de la carte ET la LED externe doivent clignoter");
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(PIN_LED_ESP, HIGH);
-    digitalWrite(PIN_LED_ALERTE, HIGH);
-    delay(250);
-    digitalWrite(PIN_LED_ESP, LOW);
-    digitalWrite(PIN_LED_ALERTE, LOW);
-    delay(250);
-  }
-  Serial.println("        Si la LED externe reste éteinte : retourner la LED (patte longue côté GPIO 19)");
+int lastPir = LOW;
+uint16_t pirEvents = 0;       // détections depuis la dernière télémétrie
+
+unsigned long lastTelemetry = 0;
+unsigned long lastWifiAttempt = 0;
+unsigned long lastMqttAttempt = 0;
+
+bool tempWarn = false;         // plafond local de température dépassé
+bool gasWarn = false;          // plafond local de gaz dépassé
+bool envWarn = false;          // l'un des deux
+bool alertOn = false;          // alerte envoyée par le serveur
+unsigned long alertUntil = 0;
+
+// Arrondi à 0,1 pour un JSON lisible (25.8 et pas 25.799999)
+static double round1(float x) {
+  return roundf(x * 10.0f) / 10.0;
 }
 
-void checkDht() {
-  delay(2000);  // le DHT22 a besoin de ~2 s après la mise sous tension
+// ============================================================================
+// ACTIONNEURS
+// ============================================================================
+
+void setAlert(bool on, int durationS) {
+  alertOn = on;
+  alertUntil = on ? millis() + (unsigned long)durationS * 1000UL : 0;
+  Serial.printf("[CMD] alerte serveur %s (%d s)\n", on ? "ON" : "OFF", durationS);
+}
+
+// Plafonds fixes avec hystérésis : premier avertissement local, sans décision d'anomalie
+void updateEnvWarn(bool dhtOk, float tempC, int gasMv, bool gasWarm) {
+  tempWarn = dhtOk && tempC > (tempWarn ? TEMP_WARN_C - TEMP_HYSTERESIS_C : TEMP_WARN_C);
+  gasWarn = gasWarm && gasMv > (gasWarn ? GAS_WARN_MV - GAS_HYSTERESIS_MV : GAS_WARN_MV);
+  if ((tempWarn || gasWarn) != envWarn) {
+    envWarn = tempWarn || gasWarn;
+    Serial.printf("[ENV] avertissement local %s (T=%.1f °C, gaz=%d mV)\n",
+                  envWarn ? "ON" : "OFF", tempC, gasMv);
+  }
+}
+
+// LED environnement : clignote pour une alerte serveur, sinon fixe si plafond dépassé
+void updateEnvLed(unsigned long now) {
+  if (alertOn && (long)(now - alertUntil) >= 0) {
+    setAlert(false, 0);
+  }
+  bool blink = (now / STROBE_HALF_PERIOD_MS) % 2;
+  digitalWrite(PIN_LED_ENV, alertOn ? blink : envWarn);
+}
+
+// Commande reçue sur vigil8/<id>/cmd
+void onMqttMessage(char* topic, byte* payload, unsigned int length) {
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, payload, length);
+  if (err) {
+    Serial.printf("[CMD] JSON invalide : %s\n", err.c_str());
+    return;
+  }
+  int duration = doc["duration_s"] | ALERT_DEFAULT_S;
+  duration = constrain(duration, 1, ALERT_MAX_S);
+  setAlert(doc["strobe"] | false, duration);
+}
+
+// ============================================================================
+// PUBLICATIONS
+// ============================================================================
+
+bool publishJson(const String& topic, JsonDocument& doc, bool retained = false) {
+  char buffer[384];
+  size_t n = serializeJson(doc, buffer, sizeof(buffer));
+  Serial.printf("[PUB] %s %s\n", topic.c_str(), buffer);
+  return mqtt.connected() && mqtt.publish(topic.c_str(), (const uint8_t*)buffer, n, retained);
+}
+
+void publishTelemetry() {
   float t = dht.readTemperature();
   float h = dht.readHumidity();
-  if (isnan(t) || isnan(h)) {
-    Serial.println("[DHT22] ERREUR : aucune réponse -> VCC sur 3V3, GND, DATA sur GPIO 4, pull-up 10k (capteur nu) ?");
+  bool dhtOk = !isnan(t) && !isnan(h);
+  unsigned long now = millis();
+
+  JsonDocument doc;
+  doc["v"] = 1;
+  doc["device_id"] = DEVICE_ID;
+  doc["seq"] = seqTelemetry;
+  doc["uptime_ms"] = now;
+  // Pas de "dernière valeur connue" : une panne doit rester visible (null)
+  if (dhtOk) {
+    doc["temp_c"] = round1(t);
+    doc["hum_pct"] = round1(h);
   } else {
-    Serial.printf("[DHT22] OK : %.1f °C, %.1f %% d'humidité\n", t, h);
+    doc["temp_c"] = nullptr;
+    doc["hum_pct"] = nullptr;
   }
+  int gasMv = (int)(analogReadMilliVolts(PIN_MQ2_AO) * MQ2_DIVIDER);
+  bool gasWarm = now >= GAS_WARMUP_MS;
+  updateEnvWarn(dhtOk, t, gasMv, gasWarm);
+  doc["gas_mv"] = gasMv;
+  doc["pir"] = digitalRead(PIN_PIR) == HIGH;
+  doc["pir_events"] = pirEvents;
+  JsonObject status = doc["status"].to<JsonObject>();
+  status["dht"] = dhtOk ? "ok" : "error";
+  status["gas_warm"] = gasWarm;
+  status["env_warn"] = envWarn;
+  status["rssi"] = WiFi.RSSI();
+
+  if (publishJson(topicTelemetry, doc)) {
+    pirEvents = 0;
+  }
+  // Incrémenté même si l'envoi échoue : le trou dans seq signale la perte
+  seqTelemetry++;
 }
 
-// Plusieurs lectures pour repérer un fil AO débranché (valeurs instables),
-// un MQ-2 non alimenté (≈ 0 V) ou un pont diviseur manquant (saturation).
-void checkMq2() {
-  const int samples = 20;
-  int minMv = 5000, maxMv = 0;
-  long sumMv = 0;
-  for (int i = 0; i < samples; i++) {
-    int mv = analogReadMilliVolts(PIN_MQ2_AO);
-    sumMv += mv;
-    if (mv < minMv) minMv = mv;
-    if (mv > maxMv) maxMv = mv;
-    delay(10);
-  }
-  int avgMv = sumMv / samples;
-
-  Serial.printf("[MQ-2]  broche %d mV (min %d / max %d), AO ≈ %d mV : ",
-                avgMv, minMv, maxMv, (int)(avgMv * MQ2_DIVIDER));
-  if (maxMv - minMv > 300) {
-    Serial.println("INSTABLE -> fil AO débranché ou mal enfoncé ?");
-  } else if (avgMv < 50) {
-    Serial.println("PAS DE SIGNAL -> VCC du MQ-2 sur VIN (5V), GND, fil AO ?");
-  } else if (avgMv > 3000) {
-    Serial.println("SATURÉ -> pont diviseur absent ? Débrancher AO pour protéger l'ESP32");
-  } else {
-    Serial.println("OK (valeurs stables après 1 à 3 min de préchauffage)");
-  }
+void publishMotionEvent(bool state) {
+  JsonDocument doc;
+  doc["v"] = 1;
+  doc["device_id"] = DEVICE_ID;
+  doc["seq"] = seqEvent++;
+  doc["uptime_ms"] = millis();
+  doc["type"] = "motion";
+  doc["state"] = state;
+  publishJson(topicEvent, doc);
 }
 
-void checkPir() {
-  Serial.printf("[PIR]   État actuel : %s\n", digitalRead(PIN_PIR) == HIGH ? "HIGH" : "LOW");
-  Serial.println("        Un PIR débranché lit LOW comme \"aucun mouvement\" : agiter la main après le préchauffage (30 s)");
+// ============================================================================
+// CONNEXIONS (non bloquantes : les capteurs continuent pendant les tentatives)
+// ============================================================================
+
+void startWifi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+#if USE_STATIC_IP
+  WiFi.config(IPAddress(STATIC_IP), IPAddress(GATEWAY_IP), IPAddress(SUBNET_MASK));
+#endif
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  lastWifiAttempt = millis();
+  Serial.printf("[WIFI] Connexion à %s...\n", WIFI_SSID);
+}
+
+void ensureWifi(unsigned long now) {
+  if (WiFi.status() == WL_CONNECTED || now - lastWifiAttempt < WIFI_RETRY_MS) return;
+  Serial.println("[WIFI] Pas de connexion, nouvel essai");
+  WiFi.disconnect();
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  lastWifiAttempt = now;
+}
+
+void ensureMqtt(unsigned long now) {
+  if (mqtt.connected() || WiFi.status() != WL_CONNECTED) return;
+  if (lastMqttAttempt && now - lastMqttAttempt < MQTT_RETRY_MS) return;
+  lastMqttAttempt = now;
+
+  Serial.printf("[MQTT] Connexion TLS à %s:%d (IP locale %s)...\n",
+                MQTT_HOST, MQTT_PORT, WiFi.localIP().toString().c_str());
+  // LWT : le broker publie {"online":false} (retenu) si le nœud disparaît
+  if (!mqtt.connect(DEVICE_ID, DEVICE_ID, MQTT_PASSWORD,
+                    topicStatus.c_str(), 1, true, "{\"online\":false}")) {
+    // -2 : TCP/TLS refusé (IP, port, certificat) ; 4/5 : identifiants ou ACL
+    Serial.printf("[MQTT] Échec (state=%d), nouvel essai dans %lu s\n",
+                  mqtt.state(), MQTT_RETRY_MS / 1000);
+    return;
+  }
+  Serial.println("[MQTT] Connecté");
+  mqtt.subscribe(topicCmd.c_str(), 1);
+
+  JsonDocument status;
+  status["online"] = true;
+  status["fw"] = FW_VERSION;
+  status["ip"] = WiFi.localIP().toString();
+  publishJson(topicStatus, status, true);
 }
 
 // ============================================================================
@@ -97,64 +219,58 @@ void checkPir() {
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  delay(500);
+  Serial.printf("\n=== SENTINEL-X %s // firmware %s ===\n", DEVICE_ID, FW_VERSION);
 
-  // INPUT_PULLDOWN force la broche à 0V si le fil OUT est débranché
   pinMode(PIN_PIR, INPUT_PULLDOWN);
   pinMode(PIN_LED_ESP, OUTPUT);
-  pinMode(PIN_LED_ALERTE, OUTPUT);
+  pinMode(PIN_LED_MOTION, OUTPUT);
+  pinMode(PIN_LED_ENV, OUTPUT);
   digitalWrite(PIN_LED_ESP, LOW);
-  digitalWrite(PIN_LED_ALERTE, LOW);
-  analogSetPinAttenuation(PIN_MQ2_AO, ADC_11db);  // plage de mesure 0-3.3 V
+  digitalWrite(PIN_LED_MOTION, LOW);
+  digitalWrite(PIN_LED_ENV, LOW);
+  analogSetPinAttenuation(PIN_MQ2_AO, ADC_11db);  // plage 0-3.3 V
   dht.begin();
 
-  Serial.println("\n==============================================");
-  Serial.println("  VIG1L-8 // DIAGNOSTIC MATÉRIEL");
-  Serial.println("==============================================");
-  checkLeds();
-  checkDht();
-  checkMq2();
-  checkPir();
-  Serial.println("==============================================\n");
+  String base = String("vigil8/") + DEVICE_ID + "/";
+  topicTelemetry = base + "telemetry";
+  topicEvent = base + "event";
+  topicStatus = base + "status";
+  topicCmd = base + "cmd";
+
+  net.setCACert(MQTT_CA_CERT);
+  mqtt.setServer(MQTT_HOST, MQTT_PORT);
+  mqtt.setCallback(onMqttMessage);
+  mqtt.setBufferSize(512);   // la télémétrie dépasse les 256 octets par défaut avec l'en-tête
+  mqtt.setKeepAlive(30);
+
+  startWifi();
 }
 
 void loop() {
   unsigned long now = millis();
-  bool pirReady = now >= PIR_WARMUP_MS;
 
-  // PIR : réaction immédiate aux changements d'état (après préchauffage)
-  int pir = digitalRead(PIN_PIR);
-  if (pirReady && pir != lastPir) {
-    if (lastPir != -1) {
-      Serial.printf("[PIR]   %s (état précédent : %.1f s)\n",
-                    pir == HIGH ? ">>> MOUVEMENT DÉTECTÉ" : "calme",
-                    (now - lastPirChange) / 1000.0);
-    }
-    digitalWrite(PIN_LED_ESP, pir);
-    digitalWrite(PIN_LED_ALERTE, pir);
-    lastPir = pir;
-    lastPirChange = now;
-  }
+  ensureWifi(now);
+  ensureMqtt(now);
+  mqtt.loop();
+  updateEnvLed(now);
 
-  // Mesures périodiques de tous les capteurs
-  if (now - lastReport >= REPORT_INTERVAL_MS) {
-    lastReport = now;
-    float t = dht.readTemperature();
-    float h = dht.readHumidity();
-    int gasMv = analogReadMilliVolts(PIN_MQ2_AO) * MQ2_DIVIDER;
-
-    if (isnan(t) || isnan(h)) {
-      Serial.print("[MESURE] DHT22 ERREUR        | ");
-    } else {
-      Serial.printf("[MESURE] T=%5.1f °C H=%5.1f %% | ", t, h);
-    }
-    Serial.printf("gaz AO=%4d mV | PIR=", gasMv);
-    if (pirReady) {
-      Serial.println(pir == HIGH ? "MOUVEMENT" : "calme");
-    } else {
-      Serial.printf("préchauffage (%lu s)\n", (PIR_WARMUP_MS - now) / 1000);
+  // PIR : événement immédiat à chaque changement (après calibration)
+  if (now >= PIR_WARMUP_MS) {
+    int pir = digitalRead(PIN_PIR);
+    if (pir != lastPir) {
+      lastPir = pir;
+      digitalWrite(PIN_LED_ESP, pir);
+      digitalWrite(PIN_LED_MOTION, pir);
+      if (pir == HIGH) pirEvents++;
+      publishMotionEvent(pir == HIGH);
     }
   }
 
-  delay(50);
+  if (now - lastTelemetry >= TELEMETRY_INTERVAL_MS) {
+    lastTelemetry = now;
+    publishTelemetry();
+  }
+
+  delay(10);
 }
