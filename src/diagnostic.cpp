@@ -18,7 +18,8 @@
 #define PIN_MQ2_AO     34  // Sortie analogique du MQ-2 (ADC1, compatible Wi-Fi)
 #define PIN_DHT         4  // Données du DHT22
 #define PIN_LED_ESP     2  // LED intégrée
-#define PIN_LED_ALERTE 19  // LED externe
+#define PIN_LED_ALERTE 19  // LED mouvement
+#define PIN_LED_ENV    18  // LED environnement
 
 const unsigned long PIR_WARMUP_MS      = 30000;  // calibration du HC-SR501 après mise sous tension
 const unsigned long REPORT_INTERVAL_MS = 2000;   // le DHT22 ne supporte qu'une lecture toutes les 2 s
@@ -35,16 +36,18 @@ unsigned long lastReport = 0;
 // ============================================================================
 
 void checkLeds() {
-  Serial.println("[LED]   Clignotement x3 : la LED de la carte ET la LED externe doivent clignoter");
+  Serial.println("[LED]   Clignotement x3 : la LED de la carte ET les 2 LED externes doivent clignoter");
   for (int i = 0; i < 3; i++) {
     digitalWrite(PIN_LED_ESP, HIGH);
     digitalWrite(PIN_LED_ALERTE, HIGH);
+    digitalWrite(PIN_LED_ENV, HIGH);
     delay(250);
     digitalWrite(PIN_LED_ESP, LOW);
     digitalWrite(PIN_LED_ALERTE, LOW);
+    digitalWrite(PIN_LED_ENV, LOW);
     delay(250);
   }
-  Serial.println("        Si la LED externe reste éteinte : retourner la LED (patte longue côté GPIO 19)");
+  Serial.println("        Si une LED externe reste éteinte : la retourner (patte longue côté GPIO 19 / GPIO 18)");
 }
 
 void checkDht() {
@@ -103,6 +106,7 @@ void setup() {
   pinMode(PIN_PIR, INPUT_PULLDOWN);
   pinMode(PIN_LED_ESP, OUTPUT);
   pinMode(PIN_LED_ALERTE, OUTPUT);
+  pinMode(PIN_LED_ENV, OUTPUT);
   digitalWrite(PIN_LED_ESP, LOW);
   digitalWrite(PIN_LED_ALERTE, LOW);
   analogSetPinAttenuation(PIN_MQ2_AO, ADC_11db);  // plage de mesure 0-3.3 V

@@ -8,7 +8,10 @@
  *    vigil8/<id>/telemetry  publié toutes les 2 s
  *    vigil8/<id>/event      publié à chaque changement d'état du PIR
  *    vigil8/<id>/status     {"online":true} à la connexion, {"online":false} en LWT (retenu)
- *    vigil8/<id>/cmd        reçu : {"buzzer":bool,"strobe":bool,"duration_s":int}
+ *    vigil8/<id>/cmd        reçu : {"strobe":bool,"duration_s":int} -> LED environnement clignotante
+ *
+ *  LED : mouvement (PIR) ; environnement fixe = plafond local gaz/température
+ *  dépassé (premier avertissement), clignotante = alerte décidée par le serveur.
  *
  *  Format détaillé : README.md de ce dépôt et de infra.
  */
@@ -48,9 +51,11 @@ unsigned long lastTelemetry = 0;
 unsigned long lastWifiAttempt = 0;
 unsigned long lastMqttAttempt = 0;
 
-bool buzzerOn = false;
-bool strobeOn = false;
-unsigned long alarmUntil = 0;
+bool tempWarn = false;         // plafond local de température dépassé
+bool gasWarn = false;          // plafond local de gaz dépassé
+bool envWarn = false;          // l'un des deux
+bool alertOn = false;          // alerte envoyée par le serveur
+unsigned long alertUntil = 0;
 
 // Arrondi à 0,1 pour un JSON lisible (25.8 et pas 25.799999)
 static double round1(float x) {
@@ -61,22 +66,30 @@ static double round1(float x) {
 // ACTIONNEURS
 // ============================================================================
 
-void setAlarm(bool buzzer, bool strobe, int durationS) {
-  buzzerOn = buzzer;
-  strobeOn = strobe;
-  digitalWrite(PIN_BUZZER, buzzerOn ? HIGH : LOW);
-  if (!strobeOn) digitalWrite(PIN_LED_ALERTE, LOW);
-  alarmUntil = (buzzerOn || strobeOn) ? millis() + (unsigned long)durationS * 1000UL : 0;
-  Serial.printf("[CMD] buzzer=%d strobe=%d pendant %d s\n", buzzerOn, strobeOn, durationS);
+void setAlert(bool on, int durationS) {
+  alertOn = on;
+  alertUntil = on ? millis() + (unsigned long)durationS * 1000UL : 0;
+  Serial.printf("[CMD] alerte serveur %s (%d s)\n", on ? "ON" : "OFF", durationS);
 }
 
-void updateAlarm(unsigned long now) {
-  if (alarmUntil && (long)(now - alarmUntil) >= 0) {
-    setAlarm(false, false, 0);
+// Plafonds fixes avec hystérésis : premier avertissement local, sans décision d'anomalie
+void updateEnvWarn(bool dhtOk, float tempC, int gasMv, bool gasWarm) {
+  tempWarn = dhtOk && tempC > (tempWarn ? TEMP_WARN_C - TEMP_HYSTERESIS_C : TEMP_WARN_C);
+  gasWarn = gasWarm && gasMv > (gasWarn ? GAS_WARN_MV - GAS_HYSTERESIS_MV : GAS_WARN_MV);
+  if ((tempWarn || gasWarn) != envWarn) {
+    envWarn = tempWarn || gasWarn;
+    Serial.printf("[ENV] avertissement local %s (T=%.1f °C, gaz=%d mV)\n",
+                  envWarn ? "ON" : "OFF", tempC, gasMv);
   }
-  if (strobeOn) {
-    digitalWrite(PIN_LED_ALERTE, (now / STROBE_HALF_PERIOD_MS) % 2 ? HIGH : LOW);
+}
+
+// LED environnement : clignote pour une alerte serveur, sinon fixe si plafond dépassé
+void updateEnvLed(unsigned long now) {
+  if (alertOn && (long)(now - alertUntil) >= 0) {
+    setAlert(false, 0);
   }
+  bool blink = (now / STROBE_HALF_PERIOD_MS) % 2;
+  digitalWrite(PIN_LED_ENV, alertOn ? blink : envWarn);
 }
 
 // Commande reçue sur vigil8/<id>/cmd
@@ -87,9 +100,9 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     Serial.printf("[CMD] JSON invalide : %s\n", err.c_str());
     return;
   }
-  int duration = doc["duration_s"] | ALARM_DEFAULT_S;
-  duration = constrain(duration, 1, ALARM_MAX_S);
-  setAlarm(doc["buzzer"] | false, doc["strobe"] | false, duration);
+  int duration = doc["duration_s"] | ALERT_DEFAULT_S;
+  duration = constrain(duration, 1, ALERT_MAX_S);
+  setAlert(doc["strobe"] | false, duration);
 }
 
 // ============================================================================
@@ -122,12 +135,16 @@ void publishTelemetry() {
     doc["temp_c"] = nullptr;
     doc["hum_pct"] = nullptr;
   }
-  doc["gas_mv"] = (int)(analogReadMilliVolts(PIN_MQ2_AO) * MQ2_DIVIDER);
+  int gasMv = (int)(analogReadMilliVolts(PIN_MQ2_AO) * MQ2_DIVIDER);
+  bool gasWarm = now >= GAS_WARMUP_MS;
+  updateEnvWarn(dhtOk, t, gasMv, gasWarm);
+  doc["gas_mv"] = gasMv;
   doc["pir"] = digitalRead(PIN_PIR) == HIGH;
   doc["pir_events"] = pirEvents;
   JsonObject status = doc["status"].to<JsonObject>();
   status["dht"] = dhtOk ? "ok" : "error";
-  status["gas_warm"] = now >= GAS_WARMUP_MS;
+  status["gas_warm"] = gasWarm;
+  status["env_warn"] = envWarn;
   status["rssi"] = WiFi.RSSI();
 
   if (publishJson(topicTelemetry, doc)) {
@@ -207,11 +224,11 @@ void setup() {
 
   pinMode(PIN_PIR, INPUT_PULLDOWN);
   pinMode(PIN_LED_ESP, OUTPUT);
-  pinMode(PIN_LED_ALERTE, OUTPUT);
-  pinMode(PIN_BUZZER, OUTPUT);
+  pinMode(PIN_LED_MOTION, OUTPUT);
+  pinMode(PIN_LED_ENV, OUTPUT);
   digitalWrite(PIN_LED_ESP, LOW);
-  digitalWrite(PIN_LED_ALERTE, LOW);
-  digitalWrite(PIN_BUZZER, LOW);
+  digitalWrite(PIN_LED_MOTION, LOW);
+  digitalWrite(PIN_LED_ENV, LOW);
   analogSetPinAttenuation(PIN_MQ2_AO, ADC_11db);  // plage 0-3.3 V
   dht.begin();
 
@@ -236,7 +253,7 @@ void loop() {
   ensureWifi(now);
   ensureMqtt(now);
   mqtt.loop();
-  updateAlarm(now);
+  updateEnvLed(now);
 
   // PIR : événement immédiat à chaque changement (après calibration)
   if (now >= PIR_WARMUP_MS) {
@@ -244,6 +261,7 @@ void loop() {
     if (pir != lastPir) {
       lastPir = pir;
       digitalWrite(PIN_LED_ESP, pir);
+      digitalWrite(PIN_LED_MOTION, pir);
       if (pir == HIGH) pirEvents++;
       publishMotionEvent(pir == HIGH);
     }
