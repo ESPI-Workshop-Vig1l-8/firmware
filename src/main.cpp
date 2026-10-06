@@ -9,6 +9,7 @@
 
 #define PIN_PIR       14  // Broche OUT (GPIO 14)
 #define PIN_LED_ESP    2  // LED intégrée
+#define PIN_LED_ALERTE 19 // LED externe (via résistance 220 Ω vers GND)
 
 const unsigned long WARMUP_MS = 30000;  // calibration du HC-SR501 après mise sous tension
 
@@ -23,11 +24,9 @@ void setup() {
   pinMode(PIN_PIR, INPUT_PULLDOWN);
   pinMode(PIN_LED_ESP, OUTPUT);
   digitalWrite(PIN_LED_ESP, LOW);
+  pinMode(PIN_LED_ALERTE, OUTPUT);
+  digitalWrite(PIN_LED_ALERTE, LOW);
 
-  Serial.println("\n==============================================");
-  Serial.println("  DIAGNOSTIC PIR HC-SR501 (GPIO 14)");
-  Serial.println("  Préchauffage 30 s, ne pas bouger...");
-  Serial.println("==============================================");
   while (millis() < WARMUP_MS) {
     Serial.print('.');
     delay(1000);
@@ -49,6 +48,7 @@ void loop() {
                     (now - lastChange) / 1000.0);
     }
     digitalWrite(PIN_LED_ESP, state);
+    digitalWrite(PIN_LED_ALERTE, state);
     lastState = state;
     lastChange = now;
   }
