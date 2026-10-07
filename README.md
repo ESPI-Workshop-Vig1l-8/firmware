@@ -47,7 +47,7 @@ GND commun à tous les composants. Réglages du HC-SR501 : cavalier sur **H**, p
 |---|---|---|
 | `vigil8/<DEVICE_ID>/telemetry` | toutes les 2 s | mesures (voir ci-dessous) |
 | `vigil8/<DEVICE_ID>/event` | changement d'état du PIR | `{"v":1,"device_id":"…","seq":12,"uptime_ms":36685120,"type":"motion","state":true}` |
-| `vigil8/<DEVICE_ID>/status` | connexion (retenu) | `{"online":true,"fw":"0.2.0","ip":"192.168.10.20"}`, et `{"online":false}` publié par le broker si le nœud disparaît |
+| `vigil8/<DEVICE_ID>/status` | connexion (retenu) | `{"online":true,"fw":"0.2.0","ip":"192.168.10.5"}`, et `{"online":false}` publié par le broker si le nœud disparaît |
 | `vigil8/<DEVICE_ID>/cmd` | reçu | `{"strobe":true,"duration_s":8}` : LED environnement clignotante (durée 1 à 60 s, 5 s par défaut) |
 
 Télémétrie :
@@ -80,7 +80,7 @@ Le format complet (stockage CouchDB, annotations) est décrit dans le README du 
 ## 4. Moniteur série (115200 bauds)
 
 ```
-[MQTT] Connexion TLS à 192.168.10.1:18883 (IP locale 192.168.10.20)...
+[MQTT] Connexion TLS à 192.168.10.1:18883 (IP locale 192.168.10.5)...
 [MQTT] Connecté
 [PUB] vigil8/VIG1L-8-NODE04/telemetry {"v":1,"device_id":"VIG1L-8-NODE04","seq":0,...}
 ```

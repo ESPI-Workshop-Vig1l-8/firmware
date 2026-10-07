@@ -16,7 +16,7 @@
 #define MQTT_PORT 18883            // port MQTTS publié par infra/docker-compose.yaml
 
 #define USE_STATIC_IP 1
-#define STATIC_IP   192, 168, 10, 20
+#define STATIC_IP   192, 168, 10, 5     // hors de la plage DHCP du hotspot (.10 à .254) : pas de conflit d'adresse
 #define GATEWAY_IP  192, 168, 10, 1
 #define SUBNET_MASK 255, 255, 255, 0
 
