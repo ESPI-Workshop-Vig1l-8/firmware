@@ -7,8 +7,9 @@
  * Câblage :
  *   PIR HC-SR501 : VCC -> VIN (5V), GND -> GND, OUT -> GPIO 14
  *   MQ-2         : VCC -> VIN (5V), GND -> GND, AO -> pont 10k/20k -> GPIO 34
- *   DHT22        : VCC -> 3V3, GND -> GND, DATA -> GPIO 4 (+ pull-up 10k vers 3V3 si capteur nu)
- *   LED alerte   : GPIO 19 -> 220 Ω -> LED -> GND
+ *   DHT22        : VCC -> GPIO 33, GND -> GND, DATA -> GPIO 27 (+ pull-up 10k vers GPIO 33 si capteur nu)
+ *   LED mouvement     : GPIO 25 -> résistance -> LED -> GND
+ *   LED environnement : GPIO 26 -> résistance -> LED -> GND
  */
 
 #include <Arduino.h>
@@ -16,10 +17,11 @@
 
 #define PIN_PIR        14  // Sortie OUT du HC-SR501
 #define PIN_MQ2_AO     34  // Sortie analogique du MQ-2 (ADC1, compatible Wi-Fi)
-#define PIN_DHT         4  // Données du DHT22
+#define PIN_DHT        27  // Données du DHT22
+#define PIN_DHT_VCC    33  // Alimentation du DHT22 (sortie à 3,3 V)
 #define PIN_LED_ESP     2  // LED intégrée
-#define PIN_LED_ALERTE 19  // LED mouvement
-#define PIN_LED_ENV    18  // LED environnement
+#define PIN_LED_ALERTE 25  // LED mouvement
+#define PIN_LED_ENV    26  // LED environnement
 
 const unsigned long PIR_WARMUP_MS      = 30000;  // calibration du HC-SR501 après mise sous tension
 const unsigned long REPORT_INTERVAL_MS = 2000;   // le DHT22 ne supporte qu'une lecture toutes les 2 s
@@ -47,7 +49,7 @@ void checkLeds() {
     digitalWrite(PIN_LED_ENV, LOW);
     delay(250);
   }
-  Serial.println("        Si une LED externe reste éteinte : la retourner (patte longue côté GPIO 19 / GPIO 18)");
+  Serial.println("        Si une LED externe reste éteinte : la retourner (patte longue côté GPIO 25 / GPIO 26)");
 }
 
 void checkDht() {
@@ -55,7 +57,7 @@ void checkDht() {
   float t = dht.readTemperature();
   float h = dht.readHumidity();
   if (isnan(t) || isnan(h)) {
-    Serial.println("[DHT22] ERREUR : aucune réponse -> VCC sur 3V3, GND, DATA sur GPIO 4, pull-up 10k (capteur nu) ?");
+    Serial.println("[DHT22] ERREUR : aucune réponse -> VCC sur GPIO 33, GND, DATA sur GPIO 27, pull-up 10k (capteur nu) ?");
   } else {
     Serial.printf("[DHT22] OK : %.1f °C, %.1f %% d'humidité\n", t, h);
   }
@@ -110,6 +112,8 @@ void setup() {
   digitalWrite(PIN_LED_ESP, LOW);
   digitalWrite(PIN_LED_ALERTE, LOW);
   analogSetPinAttenuation(PIN_MQ2_AO, ADC_11db);  // plage de mesure 0-3.3 V
+  pinMode(PIN_DHT_VCC, OUTPUT);
+  digitalWrite(PIN_DHT_VCC, HIGH);  // alimente le DHT22
   dht.begin();
 
   Serial.println("\n==============================================");

@@ -4,7 +4,7 @@
  * Les mots de passe et le certificat sont dans secrets.h (non versionné).
  */
 
-#define FW_VERSION "0.2.0"
+#define FW_VERSION "0.3.0"
 
 // Identifiant du nœud = nom d'utilisateur MQTT (voir MQTT_DEVICE_ACCOUNTS dans infra/.env)
 #define DEVICE_ID "VIG1L-8-NODE04"
@@ -23,12 +23,16 @@
 // ---------------------------------------------------------------------------
 // Broches (ESP32)
 // ---------------------------------------------------------------------------
+// Tout est sur le même côté de la carte (DevKit 30 broches : VIN, GND, 13, 12, 14, 27,
+// 26, 25, 33, 32, 35, 34) pour qu'une seule rangée de la breadboard suffise.
 #define PIN_PIR        14  // HC-SR501 OUT
 #define PIN_MQ2_AO     34  // MQ-2 AO via pont diviseur 10k/20k (ADC1, compatible Wi-Fi)
-#define PIN_DHT         4  // DHT22 DATA
+#define PIN_DHT        27  // DHT22 DATA
+#define PIN_DHT_VCC    33  // alimentation du DHT22 (sortie à 3,3 V, ~1,5 mA) : la broche 3V3
+                           // est de l'autre côté, et le firmware peut redémarrer le capteur
 #define PIN_LED_ESP     2  // LED intégrée : suit le PIR
-#define PIN_LED_MOTION 19  // LED mouvement : allumée pendant une détection du PIR
-#define PIN_LED_ENV    18  // LED environnement : fixe = plafond local dépassé,
+#define PIN_LED_MOTION 25  // LED mouvement : allumée pendant une détection du PIR
+#define PIN_LED_ENV    26  // LED environnement : fixe = plafond local dépassé,
                            //                     clignotante = alerte envoyée par le serveur (IA)
 
 // ---------------------------------------------------------------------------
@@ -38,6 +42,9 @@
 #define PIR_WARMUP_MS         30000UL    // calibration du HC-SR501
 #define GAS_WARMUP_MS         180000UL   // préchauffage du MQ-2 (status.gas_warm)
 #define MQ2_DIVIDER           1.5f       // pont 10k/20k : tension AO = tension broche x 1.5
+#define DHT_POWER_ON_MS       2000UL     // délai avant la première lecture après mise sous tension
+#define DHT_MAX_ERRORS        5          // erreurs consécutives (10 s) avant de redémarrer le DHT22
+#define DHT_POWER_OFF_MS      1000UL     // durée de la coupure
 
 // Plafonds fixes de la LED environnement : premier avertissement local uniquement,
 // la détection d'anomalies reste faite par l'IA côté serveur.
