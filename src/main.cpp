@@ -57,6 +57,12 @@ bool envWarn = false;          // l'un des deux
 bool alertOn = false;          // alerte envoyée par le serveur
 unsigned long alertUntil = 0;
 
+// Alimentation du DHT22 par PIN_DHT_VCC : redémarrage après plusieurs erreurs (capteur bloqué)
+uint8_t dhtErrors = 0;
+bool dhtPowered = false;
+unsigned long dhtReadyAt = 0;      // première lecture possible après la mise sous tension
+unsigned long dhtPowerOnAt = 0;    // fin de la coupure en cours
+
 // Arrondi à 0,1 pour un JSON lisible (25.8 et pas 25.799999)
 static double round1(float x) {
   return roundf(x * 10.0f) / 10.0;
@@ -116,10 +122,45 @@ bool publishJson(const String& topic, JsonDocument& doc, bool retained = false) 
   return mqtt.connected() && mqtt.publish(topic.c_str(), (const uint8_t*)buffer, n, retained);
 }
 
+void dhtPowerOn() {
+  digitalWrite(PIN_DHT_VCC, HIGH);
+  dht.begin();                       // remet DATA en entrée avec pull-up
+  dhtPowered = true;
+  dhtReadyAt = millis() + DHT_POWER_ON_MS;
+}
+
+void dhtPowerOff() {
+  // DATA à 0 V pendant la coupure : sinon le pull-up alimente le capteur par la ligne de données
+  pinMode(PIN_DHT, OUTPUT);
+  digitalWrite(PIN_DHT, LOW);
+  digitalWrite(PIN_DHT_VCC, LOW);
+  dhtPowered = false;
+  dhtPowerOnAt = millis() + DHT_POWER_OFF_MS;
+  Serial.println("[DHT] erreurs répétées : redémarrage du capteur");
+}
+
+// Lecture du DHT22 ; NAN pendant le démarrage ou une coupure (publié comme une erreur)
+bool readDht(float& t, float& h) {
+  unsigned long now = millis();
+  if (!dhtPowered && (long)(now - dhtPowerOnAt) >= 0) dhtPowerOn();
+  if (!dhtPowered || (long)(now - dhtReadyAt) < 0) {
+    t = h = NAN;
+    return false;
+  }
+  t = dht.readTemperature();
+  h = dht.readHumidity();
+  bool ok = !isnan(t) && !isnan(h);
+  dhtErrors = ok ? 0 : dhtErrors + 1;
+  if (dhtErrors >= DHT_MAX_ERRORS) {
+    dhtErrors = 0;
+    dhtPowerOff();
+  }
+  return ok;
+}
+
 void publishTelemetry() {
-  float t = dht.readTemperature();
-  float h = dht.readHumidity();
-  bool dhtOk = !isnan(t) && !isnan(h);
+  float t, h;
+  bool dhtOk = readDht(t, h);
   unsigned long now = millis();
 
   JsonDocument doc;
@@ -230,7 +271,8 @@ void setup() {
   digitalWrite(PIN_LED_MOTION, LOW);
   digitalWrite(PIN_LED_ENV, LOW);
   analogSetPinAttenuation(PIN_MQ2_AO, ADC_11db);  // plage 0-3.3 V
-  dht.begin();
+  pinMode(PIN_DHT_VCC, OUTPUT);
+  dhtPowerOn();
 
   String base = String("vigil8/") + DEVICE_ID + "/";
   topicTelemetry = base + "telemetry";

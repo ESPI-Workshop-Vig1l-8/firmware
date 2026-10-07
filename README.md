@@ -15,17 +15,21 @@ Firmware C++ (PlatformIO, framework Arduino) pour l'ESP32 du boîtier Sentinel-X
 | :--- | :--- | :--- | :--- |
 | **PIR HC-SR501** | VIN (5V) | GND | OUT → **GPIO 14** |
 | **MQ-2** | VIN (5V) | GND | AO → 10 kΩ → **GPIO 34**, et 20 kΩ de GPIO 34 vers GND (pont diviseur : AO peut monter à 5V) |
-| **DHT22** | 3V3 | GND | DATA → **GPIO 4** (+ pull-up 10 kΩ vers 3V3 si capteur nu) |
-| **LED mouvement** | — | cathode → GND | **GPIO 19** → 220 Ω → anode |
-| **LED environnement** | — | cathode → GND | **GPIO 18** → 220 Ω → anode |
+| **DHT22** | **GPIO 33** | GND | DATA → **GPIO 27** (+ pull-up 10 kΩ vers GPIO 33 si capteur nu) |
+| **LED mouvement** | — | cathode → GND | **GPIO 25** → 220 Ω → anode |
+| **LED environnement** | — | cathode → GND | **GPIO 26** → 220 Ω → anode |
 
-GND commun à tous les composants. Réglages du HC-SR501 : cavalier sur **H**, potentiomètre Tx au minimum.
+GND commun à tous les composants. Toutes les broches utilisées sont du même côté de la carte (DevKit 30 broches : VIN, GND, 13, 12, 14, 27, 26, 25, 33, 32, 35, 34) : sur une breadboard, l'ESP32 ne laisse qu'une rangée libre, d'un seul côté.
+
+- **DHT22 alimenté par GPIO 33** (sortie à 3,3 V, le capteur consomme ~1,5 mA) : la broche 3V3 est de l'autre côté, et le firmware redémarre le capteur après 5 erreurs consécutives (DHT22 bloqué). Ne pas l'alimenter en 5 V : DATA monterait à 5 V sur l'ESP32.
+- **Pont diviseur du MQ-2 avec trois 10 kΩ** : une entre AO et GPIO 34, deux en série entre GPIO 34 et GND (= 20 kΩ).
+- **LED** : 220 Ω à 1 kΩ ; avec 10 kΩ elles fonctionnent mais éclairent très faiblement. Réglages du HC-SR501 : cavalier sur **H**, potentiomètre Tx au minimum.
 
 | LED | Comportement |
 |---|---|
-| Mouvement (GPIO 19) + LED intégrée | allumées pendant une détection du PIR |
-| Environnement (GPIO 18), **fixe** | premier avertissement local : température > 40 °C ou gaz > 800 mV (plafonds fixes avec hystérésis, réglables dans `config.h` ; gaz ignoré pendant le préchauffage) |
-| Environnement (GPIO 18), **clignotante** | alerte envoyée par le serveur (commande `strobe`) : c'est l'IA qui décide des anomalies |
+| Mouvement (GPIO 25) + LED intégrée | allumées pendant une détection du PIR |
+| Environnement (GPIO 26), **fixe** | premier avertissement local : température > 40 °C ou gaz > 800 mV (plafonds fixes avec hystérésis, réglables dans `config.h` ; gaz ignoré pendant le préchauffage) |
+| Environnement (GPIO 26), **clignotante** | alerte envoyée par le serveur (commande `strobe`) : c'est l'IA qui décide des anomalies |
 
 ---
 
