@@ -6,7 +6,7 @@
  *
  * Câblage :
  *   PIR HC-SR501 : VCC -> VIN (5V), GND -> GND, OUT -> GPIO 14
- *   MQ-2         : VCC -> VIN (5V), GND -> GND, AO -> pont 10k/20k -> GPIO 34
+ *   MQ-2         : VCC -> VIN (5V), GND -> GND, AO -> GPIO 34 (en direct ; pont 10k/20k si besoin)
  *   DHT22        : VCC -> GPIO 33, GND -> GND, DATA -> GPIO 27 (+ pull-up 10k vers GPIO 33 si capteur nu)
  *   LED mouvement     : GPIO 25 -> résistance -> LED -> GND
  *   LED environnement : GPIO 26 -> résistance -> LED -> GND
@@ -25,7 +25,7 @@
 
 const unsigned long PIR_WARMUP_MS      = 30000;  // calibration du HC-SR501 après mise sous tension
 const unsigned long REPORT_INTERVAL_MS = 2000;   // le DHT22 ne supporte qu'une lecture toutes les 2 s
-const float         MQ2_DIVIDER        = 1.5f;   // pont 10k/20k : tension AO = tension broche × 1.5
+const float         MQ2_DIVIDER        = 1.0f;   // AO en direct ; 1.5f avec un pont 10k/20k
 
 DHT dht(PIN_DHT, DHT22);
 
@@ -64,7 +64,7 @@ void checkDht() {
 }
 
 // Plusieurs lectures pour repérer un fil AO débranché (valeurs instables),
-// un MQ-2 non alimenté (≈ 0 V) ou un pont diviseur manquant (saturation).
+// un MQ-2 non alimenté (≈ 0 V : l'ADC affiche alors son plancher, ~140 mV) ou une saturation.
 void checkMq2() {
   const int samples = 20;
   int minMv = 5000, maxMv = 0;
@@ -82,10 +82,10 @@ void checkMq2() {
                 avgMv, minMv, maxMv, (int)(avgMv * MQ2_DIVIDER));
   if (maxMv - minMv > 300) {
     Serial.println("INSTABLE -> fil AO débranché ou mal enfoncé ?");
-  } else if (avgMv < 50) {
-    Serial.println("PAS DE SIGNAL -> VCC du MQ-2 sur VIN (5V), GND, fil AO ?");
+  } else if (avgMv < 160) {
+    Serial.println("PAS DE SIGNAL (plancher de l'ADC) -> VCC du MQ-2 sur VIN (5V), GND, fil sur AO et pas DO ?");
   } else if (avgMv > 3000) {
-    Serial.println("SATURÉ -> pont diviseur absent ? Débrancher AO pour protéger l'ESP32");
+    Serial.println("SATURÉ -> AO au-dessus de 3,1 V : éloigner le gaz, ou ajouter un pont 10k/20k");
   } else {
     Serial.println("OK (valeurs stables après 1 à 3 min de préchauffage)");
   }
